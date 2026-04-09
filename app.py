@@ -19,8 +19,8 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="YouTube Channel RAG", page_icon="🎬")
-st.title("🎬 YouTube Channel RAG")
+st.set_page_config(page_title="RAG for Youtube", page_icon="🎬")
+st.title("RAG for Youtube")
 st.caption("Turn any YouTube channel into a searchable knowledge base.")
 
 # ---------------------------------------------------------------------------
