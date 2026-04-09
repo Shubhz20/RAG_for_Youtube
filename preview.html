@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube Channel RAG — Preview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0e1117;
+    color: #fafafa;
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+
+  .app {
+    max-width: 720px;
+    width: 100%;
+  }
+
+  .title { font-size: 2rem; font-weight: 700; margin-bottom: 4px; }
+  .caption { font-size: 0.9rem; color: #888; margin-bottom: 32px; }
+
+  h2 {
+    font-size: 1.35rem; font-weight: 600;
+    margin-bottom: 16px; padding-bottom: 6px;
+    border-bottom: 1px solid #262730;
+  }
+
+  .input-label { font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; display: block; }
+
+  .text-input {
+    width: 100%; padding: 10px 14px;
+    background: #262730; border: 1px solid #3b3b4f;
+    border-radius: 8px; color: #fafafa; font-size: 0.95rem;
+    margin-bottom: 16px; outline: none; transition: border-color 0.2s;
+  }
+  .text-input:focus { border-color: #ff4b4b; }
+  .text-input::placeholder { color: #666; }
+
+  .slider-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .slider-row input[type="range"] { flex: 1; accent-color: #ff4b4b; height: 6px; }
+
+  .btn {
+    display: inline-block; padding: 10px 24px;
+    background: #ff4b4b; color: #fff; border: none;
+    border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+    cursor: pointer; transition: background 0.2s; margin-bottom: 8px;
+  }
+  .btn:hover { background: #e03e3e; }
+  .btn-outline {
+    display: inline-block; padding: 8px 18px;
+    background: transparent; color: #ff4b4b;
+    border: 1px solid #ff4b4b; border-radius: 8px;
+    font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    transition: background 0.2s;
+  }
+  .btn-outline:hover { background: rgba(255,75,75,0.1); }
+
+  .divider { border: none; border-top: 1px solid #262730; margin: 32px 0; }
+
+  .success-box {
+    background: #0d2818; border: 1px solid #1a6b35;
+    border-radius: 8px; padding: 12px 16px;
+    font-size: 0.9rem; color: #4ade80;
+    margin-top: 12px; margin-bottom: 12px; display: none;
+  }
+
+  .spinner {
+    display: none; align-items: center; gap: 10px;
+    margin-top: 12px; font-size: 0.88rem; color: #aaa;
+  }
+  .spinner .dot {
+    width: 18px; height: 18px;
+    border: 2px solid #444; border-top-color: #ff4b4b;
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .badge {
+    display: inline-block; font-size: 0.7rem;
+    background: #262730; color: #888;
+    padding: 2px 8px; border-radius: 10px;
+    margin-left: 8px; vertical-align: middle;
+  }
+
+  .fade-in { animation: fadeIn 0.4s ease-in; }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Conversation history */
+  .conversation { margin-top: 24px; }
+  .conversation h2 { margin-bottom: 12px; }
+  .qa-card {
+    background: #1a1a2e; border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .qa-card .q-label {
+    font-size: 0.78rem; font-weight: 700; color: #ff4b4b;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+  }
+  .qa-card .q-text { font-weight: 600; margin-bottom: 12px; }
+  .qa-card .a-text { font-size: 0.92rem; line-height: 1.6; color: #ddd; margin-bottom: 12px; }
+  .qa-card .src-label { font-size: 0.82rem; font-weight: 600; color: #aaa; margin-bottom: 4px; }
+  .qa-card .sources a { color: #60a5fa; text-decoration: none; font-size: 0.88rem; }
+  .qa-card .sources a:hover { text-decoration: underline; }
+  .qa-card .sources li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Title -->
+  <div class="title">YouTube Channel RAG</div>
+  <div class="caption">Turn any YouTube channel into a searchable knowledge base.</div>
+
+  <!-- Section 1: Index -->
+  <h2>1. Index a Channel</h2>
+  <label class="input-label">Channel URL</label>
+  <input class="text-input" id="channelUrl" type="text"
+         placeholder="Paste a YouTube channel URL here" value="">
+
+  <label class="input-label">Max videos to index <span class="badge" id="sliderLabel">50</span></label>
+  <div class="slider-row">
+    <input type="range" min="5" max="500" value="50" step="5"
+           oninput="document.getElementById('sliderLabel').textContent=this.value">
+  </div>
+
+  <button class="btn" onclick="simulateIndex()">Index Channel</button>
+
+  <div class="spinner" id="indexSpinner">
+    <div class="dot"></div> Indexing channel — this may take a few minutes...
+  </div>
+  <div class="success-box" id="successBox"></div>
+
+  <hr class="divider">
+
+  <!-- Section 2: Ask -->
+  <h2>2. Ask Questions</h2>
+  <label class="input-label">Your question</label>
+  <input class="text-input" id="questionInput" type="text"
+         placeholder="Type any question about the channel's content" value="">
+
+  <button class="btn" onclick="simulateQuery()">Ask</button>
+
+  <div class="spinner" id="querySpinner">
+    <div class="dot"></div> Searching across videos...
+  </div>
+
+  <!-- Conversation history -->
+  <div class="conversation" id="conversationArea" style="display:none">
+    <hr class="divider">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+      <h2 style="border:none; margin:0; padding:0;">Conversation</h2>
+      <button class="btn-outline" onclick="clearHistory()">Clear History</button>
+    </div>
+    <div id="qaList"></div>
+  </div>
+
+</div>
+
+<script>
+// Keyword-matched demo answers — the preview picks the best match based on what the user types
+const demoAnswers = [
+  {
+    keywords: ["attention", "self-attention", "self attention", "mechanism"],
+    answer: 'The creator describes attention as "a communication mechanism" where every token in a sequence gets to look at every other token and decide how much to weight it (from "Let\'s build GPT: from scratch, in code, spelled out"). He walks through the math step by step: each token emits a query ("what am I looking for?") and a key ("what do I contain?"), and the dot product between them produces the affinity scores. After softmax, those scores become weights over the value vectors, giving each position a "data-dependent" way to aggregate information from context.\n\nIn his "Intro to Large Language Models" talk he zooms out and calls attention "the one big trick" that made Transformers work — because unlike RNNs, the information doesn\'t have to squeeze through a bottleneck; every token can talk to every other token "in one shot" (from "Intro to Large Language Models").',
+    sources: [
+      { title: "Let's build GPT: from scratch, in code, spelled out", url: "#" },
+      { title: "Intro to Large Language Models", url: "#" },
+    ]
+  },
+  {
+    keywords: ["backprop", "backpropagation", "gradient", "training", "learn"],
+    answer: 'The creator calls backpropagation "just the chain rule, recursively applied" and stresses that there is nothing magical about it (from "The spelled-out intro to neural networks and backpropagation"). He builds a tiny autograd engine live, showing how each operation — add, multiply, tanh — carries a small local derivative, and backprop simply multiplies those local derivatives together from the output all the way back to the inputs.\n\nHe reinforces the same idea in the makemore series, noting that "once you understand backprop at this level, everything else — Adam, batch norm, residual connections — is just engineering on top" (from "Building makemore Part 2: MLP").',
+    sources: [
+      { title: "The spelled-out intro to neural networks and backpropagation", url: "#" },
+      { title: "Building makemore Part 2: MLP", url: "#" },
+    ]
+  },
+  {
+    keywords: ["transformer", "gpt", "architecture", "model"],
+    answer: 'In "Let\'s build GPT: from scratch, in code, spelled out" the creator builds the entire Transformer decoder from an empty file, calling it "a surprisingly simple architecture once you see the pieces." The core loop is: token embeddings + positional embeddings → repeated blocks of (layer norm → multi-head self-attention → layer norm → feed-forward MLP) → final layer norm → linear projection to vocabulary logits.\n\nHe points out that the feed-forward network is where "the model actually stores knowledge" while attention is where "tokens communicate and route information" (from "Let\'s build GPT: from scratch, in code, spelled out"). In his "State of GPT" talk he adds that modern training has three stages — pretraining, supervised finetuning, and RLHF — but the underlying Transformer architecture stays the same across all of them (from "State of GPT").',
+    sources: [
+      { title: "Let's build GPT: from scratch, in code, spelled out", url: "#" },
+      { title: "State of GPT", url: "#" },
+    ]
+  },
+  {
+    keywords: ["tokenizer", "tokenization", "token", "bpe", "byte pair"],
+    answer: 'The creator dedicates an entire two-hour video to tokenization, calling it "the most annoying part of working with LLMs" but also "critically important to understand" (from "Let\'s build the GPT Tokenizer"). He implements byte-pair encoding (BPE) from scratch, showing how raw UTF-8 bytes get iteratively merged into tokens based on frequency. He explains that poor tokenization is the root cause of many weird LLM behaviors — for example, models struggling with simple character-level tasks like reversing a word, because what humans see as single characters can be split across multiple tokens.\n\nHe recommends always inspecting how your prompt tokenizes before debugging model failures: "half the time the model isn\'t wrong, your tokens are just weird" (from "Let\'s build the GPT Tokenizer").',
+    sources: [
+      { title: "Let's build the GPT Tokenizer", url: "#" },
+    ]
+  },
+  {
+    keywords: ["llm", "large language model", "rag", "langchain", "fine-tune", "finetune"],
+    answer: 'In "Intro to Large Language Models" the creator lays out the two-stage training pipeline: first a massive internet-scale pretraining phase that produces a "base model" which is essentially "a document completer," then a finetuning phase (SFT + RLHF) that turns it into a helpful assistant. He describes LLMs as "approximately a lossy compression of the internet" and warns that they should be thought of as "a new kind of operating system" rather than a simple chatbot (from "Intro to Large Language Models").\n\nHe revisits this framing in "State of GPT," adding that retrieval-augmented generation (RAG) is one of the most practical ways to reduce hallucination because "you give the model access to a search engine so it doesn\'t have to memorize everything" (from "State of GPT").',
+    sources: [
+      { title: "Intro to Large Language Models", url: "#" },
+      { title: "State of GPT", url: "#" },
+    ]
+  }
+];
+
+// Fallback for questions that don't match any keyword set
+const fallbackAnswer = {
+  answer: "The transcripts don't contain enough specific information to answer this question confidently. Try asking about topics the creator covers frequently — such as neural networks, Transformers, tokenization, backpropagation, or LLM training pipelines — for more detailed, grounded answers.",
+  sources: []
+};
+
+let queryCount = 0;
+let history = [];
+
+function simulateIndex() {
+  const url = document.getElementById('channelUrl').value.trim();
+  if (!url) { alert('Please enter a channel URL first.'); return; }
+
+  document.getElementById('successBox').style.display = 'none';
+  document.getElementById('indexSpinner').style.display = 'flex';
+
+  // Extract a channel name for the success message
+  const match = url.match(/@([^/]+)/);
+  const name = match ? match[1] : 'channel';
+  const count = Math.floor(Math.random() * 40) + 20;
+
+  setTimeout(() => {
+    document.getElementById('indexSpinner').style.display = 'none';
+    const box = document.getElementById('successBox');
+    box.textContent = '✅ Done! Indexed ' + count + ' videos from @' + name + '.';
+    box.style.display = 'block';
+    box.classList.add('fade-in');
+  }, 2200);
+}
+
+function simulateQuery() {
+  const q = document.getElementById('questionInput').value.trim();
+  if (!q) { alert('Please type a question first.'); return; }
+
+  document.getElementById('querySpinner').style.display = 'flex';
+
+  // Match the user's question to the most relevant demo answer by keywords
+  const qLower = q.toLowerCase();
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const entry of demoAnswers) {
+    let score = 0;
+    for (const kw of entry.keywords) {
+      if (qLower.includes(kw)) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = entry;
+    }
+  }
+
+  const demo = bestMatch && bestScore > 0 ? bestMatch : fallbackAnswer;
+  queryCount++;
+
+  setTimeout(() => {
+    document.getElementById('querySpinner').style.display = 'none';
+
+    history.unshift({ question: q, answer: demo.answer, sources: demo.sources, num: queryCount });
+    renderHistory();
+
+    // Clear input for next question
+    document.getElementById('questionInput').value = '';
+  }, 1800);
+}
+
+function renderHistory() {
+  const area = document.getElementById('conversationArea');
+  const list = document.getElementById('qaList');
+  area.style.display = 'block';
+
+  list.innerHTML = history.map(entry => {
+    const srcHtml = entry.sources.map(s =>
+      '<li><a href="' + s.url + '">' + s.title + '</a></li>'
+    ).join('');
+    return `
+      <div class="qa-card fade-in">
+        <div class="q-label">Q${entry.num}</div>
+        <div class="q-text">${entry.question}</div>
+        <div class="a-text">${entry.answer}</div>
+        <div class="src-label">Sources</div>
+        <ul class="sources">${srcHtml}</ul>
+      </div>`;
+  }).join('');
+}
+
+function clearHistory() {
+  history = [];
+  queryCount = 0;
+  document.getElementById('qaList').innerHTML = '';
+  document.getElementById('conversationArea').style.display = 'none';
+}
+</script>
+</body>
+</html>
