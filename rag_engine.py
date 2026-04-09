@@ -3,7 +3,9 @@ rag_engine.py — Core backend for YouTube Channel RAG
 
 100% FREE stack:
   - Transcripts  : yt-dlp subtitle download (no API key needed)
-  - Embeddings   : sentence-transformers all-MiniLM-L6-v2 (runs locally, free)
+  - Embeddings   : ChromaDB built-in DefaultEmbeddingFunction
+                   (uses all-MiniLM-L6-v2 via onnxruntime — no sentence_transformers needed,
+                    works on Python 3.14+, runs locally, free)
   - Vector DB    : ChromaDB (local, free)
   - LLM answers  : Groq API — free tier, just needs a free account at console.groq.com
 """
@@ -13,20 +15,21 @@ import re
 import tempfile
 from yt_dlp import YoutubeDL
 import chromadb
-from sentence_transformers import SentenceTransformer
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from groq import Groq
 
 # ---------------------------------------------------------------------------
-# Load the embedding model once and cache it (free, runs locally)
-# all-MiniLM-L6-v2 is ~80 MB, fast, and works great for RAG
+# Load the embedding function once and cache it (free, runs locally)
+# ChromaDB's DefaultEmbeddingFunction uses all-MiniLM-L6-v2 via onnxruntime.
+# No separate sentence_transformers install needed.
 # ---------------------------------------------------------------------------
-_embed_model = None
+_embed_fn = None
 
-def get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embed_model
+def get_embed_fn():
+    global _embed_fn
+    if _embed_fn is None:
+        _embed_fn = DefaultEmbeddingFunction()
+    return _embed_fn
 
 
 # ---------------------------------------------------------------------------
@@ -275,13 +278,17 @@ def chunk_text(text, chunk_size=500, overlap=50):
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — Generate embeddings (FREE — runs locally via sentence-transformers)
+# Step 4 — Generate embeddings (FREE — runs locally via onnxruntime)
 # ---------------------------------------------------------------------------
 
 def get_embedding(text):
-    """Embed text using the local all-MiniLM-L6-v2 model. No API key needed."""
-    model = get_embed_model()
-    return model.encode(text, normalize_embeddings=True).tolist()
+    """
+    Embed text using ChromaDB's built-in DefaultEmbeddingFunction.
+    Uses all-MiniLM-L6-v2 via onnxruntime — no API key, no extra installs,
+    and compatible with Python 3.14+.
+    """
+    fn = get_embed_fn()
+    return fn([text])[0]
 
 
 # ---------------------------------------------------------------------------
