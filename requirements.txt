@@ -4,3 +4,4 @@ openai
 chromadb
 streamlit
 python-dotenv
+faster-whisper

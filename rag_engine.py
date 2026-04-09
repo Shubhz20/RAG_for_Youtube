@@ -3,7 +3,7 @@ rag_engine.py — Core backend for YouTube Channel RAG
 
 This file handles everything:
   1. Fetching video IDs from a YouTube channel
-  2. Downloading transcripts for each video
+  2. Downloading transcripts for each video (captions → Whisper fallback)
   3. Chunking transcripts into smaller pieces
   4. Generating embeddings via OpenAI
   5. Storing chunks + embeddings in ChromaDB
@@ -11,10 +11,26 @@ This file handles everything:
 """
 
 import os
+import tempfile
 from youtube_transcript_api import YouTubeTranscriptApi
 from yt_dlp import YoutubeDL
 from openai import OpenAI
 import chromadb
+from faster_whisper import WhisperModel
+
+# ---------------------------------------------------------------------------
+# Load the local Whisper model once (reused across all transcriptions)
+# "base" is ~150 MB — good balance of speed and accuracy.
+# Use "tiny" (~75 MB) if you're low on RAM, or "small" (~500 MB) for better quality.
+# ---------------------------------------------------------------------------
+_whisper_model = None
+
+def get_whisper_model():
+    """Load the Whisper model once and cache it in memory."""
+    global _whisper_model
+    if _whisper_model is None:
+        _whisper_model = WhisperModel("base", compute_type="int8", device="cpu")
+    return _whisper_model
 
 # ---------------------------------------------------------------------------
 # Setup clients
@@ -110,19 +126,92 @@ def get_channel_video_ids(channel_url, max_videos=100):
 # Step 2 — Fetch transcript for a single video
 # ---------------------------------------------------------------------------
 
-def get_transcript(video_id):
+def get_transcript_from_captions(video_id):
     """
-    Download the auto-generated transcript for a video.
-
-    Returns the full transcript as a single string, or None if unavailable.
+    Try to get the transcript from YouTube's built-in captions (free, fast).
+    Returns the transcript string, or None if captions aren't available.
     """
     try:
         transcript_pieces = YouTubeTranscriptApi.get_transcript(video_id)
         full_text = " ".join([piece["text"] for piece in transcript_pieces])
         return full_text
     except Exception:
-        # Some videos have no captions — just skip them
         return None
+
+
+def get_transcript_from_whisper(video_id):
+    """
+    Fallback: download the audio with yt-dlp and transcribe it locally
+    using faster-whisper (100% free, no API calls).
+
+    Args:
+        video_id: YouTube video ID.
+
+    Returns:
+        The transcript string, or None if download/transcription fails.
+    """
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    try:
+        # Create a temp directory for the audio file
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = os.path.join(tmp_dir, "audio.mp3")
+
+            # Download audio only, convert to mp3
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(tmp_dir, "audio.%(ext)s"),
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "64",  # low quality = smaller file, faster
+                }],
+                "quiet": True,
+                "no_warnings": True,
+            }
+
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+
+            if not os.path.exists(audio_path):
+                return None
+
+            # Transcribe locally with faster-whisper (FREE)
+            model = get_whisper_model()
+            segments, _ = model.transcribe(audio_path, beam_size=3)
+
+            # Combine all segments into a single transcript string
+            full_text = " ".join([seg.text.strip() for seg in segments])
+            return full_text if full_text.strip() else None
+
+    except Exception:
+        return None
+
+
+def get_transcript(video_id):
+    """
+    Get the transcript for a video, trying two methods (both FREE):
+      1. YouTube captions (instant, no compute needed)
+      2. Local Whisper transcription (downloads audio, runs model locally)
+
+    Args:
+        video_id: YouTube video ID.
+
+    Returns:
+        Tuple of (transcript_text, method) or (None, None).
+        method is "captions" or "whisper".
+    """
+    # Method 1: Try YouTube captions first (free and fast)
+    text = get_transcript_from_captions(video_id)
+    if text:
+        return text, "captions"
+
+    # Method 2: Fall back to local Whisper transcription (also free)
+    text = get_transcript_from_whisper(video_id)
+    if text:
+        return text, "whisper"
+
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +269,10 @@ def index_channel(channel_url, max_videos=100, progress_callback=None):
     """
     End-to-end pipeline: fetch videos, get transcripts, embed, store.
 
+    For each video:
+      - First tries YouTube's built-in captions (free)
+      - If no captions, downloads audio and transcribes with Whisper
+
     Args:
         channel_url:       YouTube channel URL.
         max_videos:        Max videos to process.
@@ -199,14 +292,24 @@ def index_channel(channel_url, max_videos=100, progress_callback=None):
         progress_callback(f"Found {len(videos)} videos. Starting transcription...")
 
     indexed_count = 0
+    captions_count = 0
+    whisper_count = 0
 
     for idx, (video_id, title) in enumerate(videos):
-        # 2. Get transcript
-        transcript = get_transcript(video_id)
+        # 2. Get transcript (captions first, then local Whisper fallback)
+        transcript, method = get_transcript(video_id)
+
         if not transcript:
             if progress_callback:
-                progress_callback(f"[{idx+1}/{len(videos)}] Skipped (no transcript): {title}")
+                progress_callback(
+                    f"[{idx+1}/{len(videos)}] Failed (no audio/too long): {title}"
+                )
             continue
+
+        if method == "captions":
+            captions_count += 1
+        else:
+            whisper_count += 1
 
         # 3. Chunk the transcript
         chunks = chunk_text(transcript)
@@ -231,15 +334,22 @@ def index_channel(channel_url, max_videos=100, progress_callback=None):
                     "title": title,
                     "url": f"https://youtube.com/watch?v={video_id}",
                     "chunk_index": chunk_idx,
+                    "transcript_method": method,
                 }],
             )
 
         indexed_count += 1
+        method_label = "captions" if method == "captions" else "whisper"
         if progress_callback:
-            progress_callback(f"[{idx+1}/{len(videos)}] Indexed: {title}")
+            progress_callback(
+                f"[{idx+1}/{len(videos)}] Indexed ({method_label}): {title}"
+            )
 
     if progress_callback:
-        progress_callback(f"Done! Indexed {indexed_count} videos.")
+        progress_callback(
+            f"\nDone! Indexed {indexed_count}/{len(videos)} videos "
+            f"({captions_count} from captions, {whisper_count} from Whisper)."
+        )
 
     return indexed_count
 
