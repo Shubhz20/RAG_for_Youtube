@@ -21,10 +21,32 @@ import chromadb
 # ---------------------------------------------------------------------------
 
 def get_openai_client():
-    """Return an OpenAI client using the API key from the environment."""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    """
+    Return an OpenAI client.
+    Checks three places in order:
+      1. Streamlit secrets  (for Streamlit Cloud deployment)
+      2. Environment variable (for local .env / export)
+      3. Raises a clear error if neither is found
+    """
+    api_key = None
+
+    # 1. Try Streamlit secrets first (works on Streamlit Cloud)
+    try:
+        import streamlit as st
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        pass
+
+    # 2. Fall back to environment variable (works locally with .env)
     if not api_key:
-        raise ValueError("Set OPENAI_API_KEY in your environment or .env file.")
+        api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY not found. "
+            "For local: create a .env file with OPENAI_API_KEY=sk-... "
+            "For Streamlit Cloud: add it in App Settings → Secrets."
+        )
     return OpenAI(api_key=api_key)
 
 
