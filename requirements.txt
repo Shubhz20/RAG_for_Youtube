@@ -1,9 +1,8 @@
-youtube-transcript-api
 yt-dlp
 openai
 chromadb
 streamlit
 python-dotenv
 # faster-whisper is optional — install locally for audio fallback transcription
-# It doesn't build reliably on Streamlit Cloud, so it's commented out here
+# Commented out because it doesn't build on Streamlit Cloud
 # faster-whisper
