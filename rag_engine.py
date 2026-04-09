@@ -69,27 +69,38 @@ def get_channel_video_ids(channel_url, max_videos=100):
     Use yt-dlp to extract video IDs from a YouTube channel URL.
 
     Args:
-        channel_url: Full URL like "https://www.youtube.com/@ChannelName/videos"
+        channel_url: Any YouTube channel URL — handles all formats:
+                     https://www.youtube.com/@ChannelName
+                     https://www.youtube.com/@ChannelName/videos
+                     https://www.youtube.com/c/ChannelName
+                     https://www.youtube.com/channel/UC...
         max_videos:  Cap on how many videos to fetch (default 100)
 
     Returns:
         List of (video_id, title) tuples.
     """
+    # Normalize the URL to always point to the /videos tab
+    # Without this, yt-dlp returns tabs (Videos, Live, Shorts) instead of actual videos
+    url = channel_url.rstrip("/")
+    if not url.endswith("/videos"):
+        url = url + "/videos"
+
     ydl_opts = {
-        "extract_flat": True,      # don't download, just list
+        "extract_flat": "in_playlist",  # go one level deep into the playlist
         "quiet": True,
         "no_warnings": True,
         "playlistend": max_videos,
     }
 
     with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(channel_url, download=False)
+        info = ydl.extract_info(url, download=False)
 
     videos = []
     for entry in info.get("entries", []):
         video_id = entry.get("id")
         title = entry.get("title", "Untitled")
-        if video_id:
+        # Only include actual videos (11-char IDs), skip sub-playlists
+        if video_id and len(video_id) == 11:
             videos.append((video_id, title))
 
     return videos
