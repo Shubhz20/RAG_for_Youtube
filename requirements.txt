@@ -4,4 +4,6 @@ openai
 chromadb
 streamlit
 python-dotenv
-faster-whisper
+# faster-whisper is optional — install locally for audio fallback transcription
+# It doesn't build reliably on Streamlit Cloud, so it's commented out here
+# faster-whisper
