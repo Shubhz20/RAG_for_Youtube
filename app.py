@@ -2,13 +2,18 @@
 app.py — Streamlit UI for YouTube Channel RAG
 
 Run with:  streamlit run app.py
+
+FREE stack — only key needed is a free Groq API key:
+  Get one at: https://console.groq.com
+  Add to .env as: GROQ_API_KEY=gsk_...
+  Or add to Streamlit Secrets as: GROQ_API_KEY = "gsk_..."
 """
 
 import streamlit as st
 from dotenv import load_dotenv
 from rag_engine import index_channel, query_channel
 
-# Load .env so OPENAI_API_KEY is available
+# Load .env so GROQ_API_KEY is available locally
 load_dotenv()
 
 # ---------------------------------------------------------------------------

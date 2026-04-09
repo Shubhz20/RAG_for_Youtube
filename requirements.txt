@@ -1,6 +1,7 @@
 yt-dlp
-openai
+groq
 chromadb
+sentence-transformers
 streamlit
 python-dotenv
 # faster-whisper is optional — install locally for audio fallback transcription

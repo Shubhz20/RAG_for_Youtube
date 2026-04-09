@@ -1,21 +1,33 @@
 """
 rag_engine.py — Core backend for YouTube Channel RAG
 
-Transcript strategy (all FREE, 403-resistant):
-  1. yt-dlp subtitle download — downloads .vtt files directly, handles
-     YouTube bot-detection far better than youtube-transcript-api.
-     Tries English first, then any available language.
-  2. Optional cookies — if YOUTUBE_COOKIES is set in Streamlit secrets
-     (or the env), it's passed to yt-dlp for maximum reliability on
-     cloud IPs where YouTube is most aggressive about blocking.
+100% FREE stack:
+  - Transcripts  : yt-dlp subtitle download (no API key needed)
+  - Embeddings   : sentence-transformers all-MiniLM-L6-v2 (runs locally, free)
+  - Vector DB    : ChromaDB (local, free)
+  - LLM answers  : Groq API — free tier, just needs a free account at console.groq.com
 """
 
 import os
 import re
 import tempfile
 from yt_dlp import YoutubeDL
-from openai import OpenAI
 import chromadb
+from sentence_transformers import SentenceTransformer
+from groq import Groq
+
+# ---------------------------------------------------------------------------
+# Load the embedding model once and cache it (free, runs locally)
+# all-MiniLM-L6-v2 is ~80 MB, fast, and works great for RAG
+# ---------------------------------------------------------------------------
+_embed_model = None
+
+def get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embed_model
+
 
 # ---------------------------------------------------------------------------
 # Optional: local Whisper (works locally, skips gracefully on cloud)
@@ -43,23 +55,27 @@ def get_whisper_model():
 # Setup clients
 # ---------------------------------------------------------------------------
 
-def get_openai_client():
-    """Return OpenAI client — checks Streamlit secrets then env variable."""
+def get_groq_client():
+    """
+    Return a Groq client using GROQ_API_KEY.
+    Get a free key at: https://console.groq.com
+    Add it to Streamlit Cloud Secrets as:  GROQ_API_KEY = "gsk_..."
+    """
     api_key = None
     try:
         import streamlit as st
-        api_key = st.secrets.get("OPENAI_API_KEY")
+        api_key = st.secrets.get("GROQ_API_KEY")
     except Exception:
         pass
     if not api_key:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise ValueError(
-            "OPENAI_API_KEY not found. "
-            "For local: add to .env. "
-            "For Streamlit Cloud: add in App Settings → Secrets."
+            "GROQ_API_KEY not found. "
+            "Get a free key at https://console.groq.com "
+            "then add it to Streamlit Secrets or your .env file."
         )
-    return OpenAI(api_key=api_key)
+    return Groq(api_key=api_key)
 
 
 def get_chroma_collection(collection_name="youtube_channel"):
@@ -70,14 +86,12 @@ def get_chroma_collection(collection_name="youtube_channel"):
 
 def get_youtube_cookies_path():
     """
-    If YOUTUBE_COOKIES is set (Netscape/cookies.txt format), write it to a
-    temp file and return the path so yt-dlp can use it.
+    Optional: pass YouTube cookies to yt-dlp to avoid 403 errors on cloud IPs.
 
     How to get your cookies:
-      1. Install the browser extension "Get cookies.txt LOCALLY"
-      2. Open youtube.com while logged in
-      3. Click the extension → Export → copy the full text
-      4. Paste it into Streamlit Cloud Secrets as:
+      1. Install browser extension "Get cookies.txt LOCALLY"
+      2. Open youtube.com while logged in → export cookies
+      3. Paste the full text into Streamlit Secrets as:
             YOUTUBE_COOKIES = \"\"\"
             # Netscape HTTP Cookie File
             .youtube.com  TRUE  /  ...
@@ -95,7 +109,6 @@ def get_youtube_cookies_path():
     if not cookies_content:
         return None
 
-    # Write to a temp file — yt-dlp reads from disk
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     )
@@ -109,10 +122,7 @@ def get_youtube_cookies_path():
 # ---------------------------------------------------------------------------
 
 def get_channel_video_ids(channel_url, max_videos=100):
-    """
-    Extract video IDs from a YouTube channel URL using yt-dlp.
-    Normalises any channel URL format to the /videos tab.
-    """
+    """Extract video IDs from any YouTube channel URL format."""
     url = channel_url.rstrip("/")
     if not url.endswith("/videos"):
         url = url + "/videos"
@@ -123,7 +133,6 @@ def get_channel_video_ids(channel_url, max_videos=100):
         "no_warnings": True,
         "playlistend": max_videos,
     }
-
     cookies_path = get_youtube_cookies_path()
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
@@ -131,47 +140,34 @@ def get_channel_video_ids(channel_url, max_videos=100):
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    videos = []
-    for entry in info.get("entries", []):
-        video_id = entry.get("id")
-        title = entry.get("title", "Untitled")
-        if video_id and len(video_id) == 11:
-            videos.append((video_id, title))
-
-    return videos
+    return [
+        (e["id"], e.get("title", "Untitled"))
+        for e in info.get("entries", [])
+        if e.get("id") and len(e["id"]) == 11
+    ]
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Fetch subtitles via yt-dlp (replaces youtube-transcript-api)
+# Step 2 — Fetch subtitles via yt-dlp
 # ---------------------------------------------------------------------------
 
 def parse_vtt(vtt_text):
-    """
-    Convert a WebVTT subtitle string to plain text.
-    Strips timing lines, HTML tags, and deduplicates repeated lines
-    (auto-generated captions often repeat the same line in consecutive cues).
-    """
+    """Convert WebVTT subtitle text to clean plain text."""
     text_lines = []
     for line in vtt_text.splitlines():
         line = line.strip()
-        # Skip header, cue timings, blank lines, and cue identifiers
         if not line:
             continue
-        if line.startswith("WEBVTT") or line.startswith("NOTE") or line.startswith("STYLE"):
+        if line.startswith(("WEBVTT", "NOTE", "STYLE")):
             continue
-        if "-->" in line:
+        if "-->" in line or re.match(r"^\d+$", line):
             continue
-        if re.match(r"^\d+$", line):          # bare cue numbers
-            continue
-        # Strip inline tags: <00:00:00.000>, <c>, </c>, <b>, etc.
-        line = re.sub(r"<[^>]+>", "", line)
-        line = line.strip()
+        line = re.sub(r"<[^>]+>", "", line).strip()
         if line:
             text_lines.append(line)
 
-    # Remove consecutive duplicates (very common in auto-captions)
-    deduped = []
-    prev = None
+    # Remove consecutive duplicate lines (common in auto-captions)
+    deduped, prev = [], None
     for line in text_lines:
         if line != prev:
             deduped.append(line)
@@ -182,27 +178,17 @@ def parse_vtt(vtt_text):
 
 def get_transcript_from_subtitles(video_id):
     """
-    Download subtitles for a video using yt-dlp and return the text.
-
-    yt-dlp handles YouTube's bot-detection far better than direct HTTP
-    requests, so this works reliably on Streamlit Cloud where
-    youtube-transcript-api gets 403 errors.
-
-    Tries in order:
-      1. Manual English subtitles
-      2. Auto-generated English subtitles
-      3. Any other language (auto or manual)
+    Download subtitles using yt-dlp and return plain text.
+    Tries English first, then any available language.
     """
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             ydl_opts = {
                 "skip_download": True,
-                "writesubtitles": True,       # manual captions
-                "writeautomaticsub": True,    # auto-generated captions
+                "writesubtitles": True,
+                "writeautomaticsub": True,
                 "subtitlesformat": "vtt",
-                # Try English first, then a broad set of common languages
                 "subtitleslangs": [
                     "en", "en-US", "en-GB", "en-IN",
                     "hi", "es", "fr", "de", "pt", "ja", "ko",
@@ -212,7 +198,6 @@ def get_transcript_from_subtitles(video_id):
                 "quiet": True,
                 "no_warnings": True,
             }
-
             cookies_path = get_youtube_cookies_path()
             if cookies_path:
                 ydl_opts["cookiefile"] = cookies_path
@@ -220,36 +205,26 @@ def get_transcript_from_subtitles(video_id):
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
 
-            # Collect all downloaded .vtt files
-            vtt_files = [
-                f for f in os.listdir(tmp_dir) if f.endswith(".vtt")
-            ]
+            vtt_files = [f for f in os.listdir(tmp_dir) if f.endswith(".vtt")]
             if not vtt_files:
                 return None, None
 
-            # Prefer English subtitle files
             en_files = [f for f in vtt_files if ".en" in f.lower()]
             chosen = en_files[0] if en_files else vtt_files[0]
-            lang_label = "en" if en_files else chosen.split(".")[-2]
+            lang = "en" if en_files else chosen.split(".")[-2]
 
             with open(os.path.join(tmp_dir, chosen), "r", encoding="utf-8") as f:
-                vtt_text = f.read()
+                text = parse_vtt(f.read())
 
-            text = parse_vtt(vtt_text)
-            return (text, f"subtitles ({lang_label})") if text.strip() else (None, None)
-
+            return (text, f"subtitles ({lang})") if text.strip() else (None, None)
     except Exception:
         return None, None
 
 
 def get_transcript_from_whisper(video_id):
-    """
-    Last-resort fallback: download audio and transcribe with local Whisper.
-    Only runs if faster-whisper is installed (won't run on Streamlit Cloud).
-    """
+    """Last-resort: local Whisper audio transcription (only if installed)."""
     if not _whisper_available:
         return None, None
-
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -257,79 +232,56 @@ def get_transcript_from_whisper(video_id):
             ydl_opts = {
                 "format": "bestaudio/best",
                 "outtmpl": os.path.join(tmp_dir, "audio.%(ext)s"),
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "64",
-                }],
-                "quiet": True,
-                "no_warnings": True,
+                "postprocessors": [{"key": "FFmpegExtractAudio",
+                                    "preferredcodec": "mp3",
+                                    "preferredquality": "64"}],
+                "quiet": True, "no_warnings": True,
             }
             cookies_path = get_youtube_cookies_path()
             if cookies_path:
                 ydl_opts["cookiefile"] = cookies_path
-
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
-
             if not os.path.exists(audio_path):
                 return None, None
-
             model = get_whisper_model()
             segments, _ = model.transcribe(audio_path, beam_size=3)
-            full_text = " ".join([seg.text.strip() for seg in segments])
-            return (full_text, "whisper") if full_text.strip() else (None, None)
-
+            text = " ".join([s.text.strip() for s in segments])
+            return (text, "whisper") if text.strip() else (None, None)
     except Exception:
         return None, None
 
 
 def get_transcript(video_id):
-    """
-    Get a transcript for a video using all available strategies:
-      1. yt-dlp subtitle download (manual + auto-generated, any language)
-      2. Local Whisper transcription (only if faster-whisper is installed)
-
-    Returns: (transcript_text, method_label) or (None, None)
-    """
+    """Try all transcript strategies in order."""
     text, method = get_transcript_from_subtitles(video_id)
     if text:
         return text, method
-
-    text, method = get_transcript_from_whisper(video_id)
-    if text:
-        return text, method
-
-    return None, None
+    return get_transcript_from_whisper(video_id)
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Chunk text into overlapping pieces
+# Step 3 — Chunk text
 # ---------------------------------------------------------------------------
 
 def chunk_text(text, chunk_size=500, overlap=50):
-    """Split text into word-level chunks with overlap."""
+    """Split text into overlapping word-level chunks."""
     words = text.split()
-    chunks = []
     step = chunk_size - overlap
-    for start in range(0, len(words), step):
-        chunks.append(" ".join(words[start : start + chunk_size]))
-    return chunks
+    return [
+        " ".join(words[i : i + chunk_size])
+        for i in range(0, len(words), step)
+    ]
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — Generate embeddings
+# Step 4 — Generate embeddings (FREE — runs locally via sentence-transformers)
 # ---------------------------------------------------------------------------
 
-def get_embedding(text, client=None):
-    """Embed text with OpenAI text-embedding-3-small."""
-    if client is None:
-        client = get_openai_client()
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text,
-    )
-    return response.data[0].embedding
+def get_embedding(text):
+    """Embed text using the local all-MiniLM-L6-v2 model. No API key needed."""
+    model = get_embed_model()
+    return model.encode(text, normalize_embeddings=True).tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +290,6 @@ def get_embedding(text, client=None):
 
 def index_channel(channel_url, max_videos=100, progress_callback=None):
     """Fetch → transcribe → embed → store every video in the channel."""
-    openai_client = get_openai_client()
     collection = get_chroma_collection()
 
     if progress_callback:
@@ -358,7 +309,7 @@ def index_channel(channel_url, max_videos=100, progress_callback=None):
         if not transcript:
             if progress_callback:
                 progress_callback(
-                    f"[{idx+1}/{len(videos)}] Skipped (no subtitles available): {title}"
+                    f"[{idx+1}/{len(videos)}] Skipped (no subtitles): {title}"
                 )
             continue
 
@@ -367,11 +318,9 @@ def index_channel(channel_url, max_videos=100, progress_callback=None):
 
         for chunk_idx, chunk in enumerate(chunks):
             doc_id = f"{video_id}_chunk_{chunk_idx}"
-            existing = collection.get(ids=[doc_id])
-            if existing and existing["ids"]:
+            if collection.get(ids=[doc_id])["ids"]:
                 continue
-
-            embedding = get_embedding(chunk, client=openai_client)
+            embedding = get_embedding(chunk)
             collection.add(
                 documents=[chunk],
                 embeddings=[embedding],
@@ -405,8 +354,7 @@ def index_channel(channel_url, max_videos=100, progress_callback=None):
 # ---------------------------------------------------------------------------
 
 def query_channel(question, n_results=5):
-    """Similarity search + GPT answer generation."""
-    openai_client = get_openai_client()
+    """Similarity search + free Groq LLM answer generation."""
     collection = get_chroma_collection()
 
     if collection.count() == 0:
@@ -415,7 +363,9 @@ def query_channel(question, n_results=5):
             "sources": [],
         }
 
-    q_embedding = get_embedding(question, client=openai_client)
+    # Embed the question locally (free)
+    q_embedding = get_embedding(question)
+
     results = collection.query(
         query_embeddings=[q_embedding],
         n_results=n_results,
@@ -424,18 +374,18 @@ def query_channel(question, n_results=5):
     documents = results["documents"][0]
     metadatas = results["metadatas"][0]
 
-    context_parts = []
-    for doc, meta in zip(documents, metadatas):
-        context_parts.append(f'[Video: "{meta["title"]}"]\n{doc}')
+    context_parts = [
+        f'[Video: "{m["title"]}"]\n{d}'
+        for d, m in zip(documents, metadatas)
+    ]
     context = "\n\n---\n\n".join(context_parts)
 
     seen_urls = set()
     sources = []
     for meta in metadatas:
-        url = meta["url"]
-        if url not in seen_urls:
-            seen_urls.add(url)
-            sources.append({"title": meta["title"], "url": url})
+        if meta["url"] not in seen_urls:
+            seen_urls.add(meta["url"])
+            sources.append({"title": meta["title"], "url": meta["url"]})
 
     prompt = f"""You are a research assistant that answers questions using YouTube
 transcript data. Follow these rules strictly:
@@ -447,8 +397,7 @@ transcript data. Follow these rules strictly:
    parentheses, e.g. (from "Video Title").
 4. If the creator explains the topic across multiple videos, synthesize the
    information and note which video each part comes from.
-5. If the context does not contain enough information to answer, say so clearly
-   and suggest what the user might search for instead.
+5. If the context does not contain enough information to answer, say so clearly.
 6. Keep the answer well-structured: use short paragraphs, not bullet points.
 
 Transcript context:
@@ -458,8 +407,10 @@ Question: {question}
 
 Answer:"""
 
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+    # Answer using Groq's free LLM (llama-3.3-70b — fast and free)
+    groq_client = get_groq_client()
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
     )
